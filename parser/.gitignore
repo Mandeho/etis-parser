@@ -3,3 +3,5 @@ build
 
 .idea
 .env
+
+test.js

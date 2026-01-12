@@ -2,9 +2,6 @@ import puppeteer, {Browser, Page} from "puppeteer";
 import urls from "./src/urls.js"
 import selectors from "./src/selectors.js"
 
-import { configDotenv } from "dotenv";
-configDotenv()
-
 interface TimeTableDay {
     title: string
     pairs: Pair[],
@@ -21,7 +18,7 @@ interface Pair {
     auditorium: string
 }
 
-class EtisParser {
+export class EtisParser {
     browser: Browser;
     page: Page;
     e_login = ""
