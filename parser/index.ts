@@ -2,48 +2,47 @@ import puppeteer, {Browser, Page} from "puppeteer";
 import urls from "./src/urls.js"
 import selectors from "./src/selectors.js"
 
+import { configDotenv } from "dotenv";
+configDotenv()
 
-console.log(urls, selectors)
+interface TimeTableDay {
+    title: string
+    pairs: Pair[],
+    no_pairs: boolean
+}
+
+interface Pair {
+    num: string
+    time: string
+
+    distance: boolean
+    pair: string
+    teacher: string
+    auditorium: string
+}
 
 class EtisParser {
-    browser = new Browser();
-    page = new Page();
+    browser: Browser;
+    page: Page;
     e_login = ""
     e_password = ""
 
     session_cookie = {}
 
-    constructor(login, password) {
+    constructor(login: string, password: string) {
         this.e_login = login;
         this.e_password = password;
     }
 
     async init() {
         this.browser = await puppeteer.launch({
-            headless: false,
+            headless: true,
             args: ['--ignore-certificate-errors'],
         });
 
-        await this.browser.setCookie({
-            name: 'session_id',
-            value: '32288051jnagzkvLJVtFkeGDekhcfIESAwQDOJnlneSAVFHU',
-            domain: '.student.psu.ru',
-            path: '/',
-            expires: -1,
-            size: 58,
-            httpOnly: false,
-            secure: false,
-            session: true,
-            priority: 'Medium',
-            sameParty: false,
-            sourceScheme: 'Secure',
-            sourcePort: 443,
-            partitionKey: undefined
-        })
-
-        let new_page = await this.browser.newPage()
-        this.page = new_page;
-        await new_page.goto(urls.timetable);
+        this.page = await this.browser.newPage()
+       
+        await this.page.goto(urls.timetable);
         await this.login()
 
         await this.page.waitForSelector(selectors.timetable);
@@ -55,11 +54,11 @@ class EtisParser {
 
     async login() {
         await this.page.evaluate((login, password, selectors) => {
-            let form = document.querySelector(selectors.login.form);
+            let form = document.querySelector(selectors.login.form) as HTMLFormElement
 
             if (form) {
-                let loginInput = form.querySelector(selectors.login.login)
-                let passwordInput = form.querySelector(selectors.login.password)
+                let loginInput = form.querySelector(selectors.login.login) as HTMLInputElement
+                let passwordInput = form.querySelector(selectors.login.password) as HTMLInputElement
 
                 loginInput.value = login;
                 passwordInput.value =  password;
@@ -72,19 +71,20 @@ class EtisParser {
 
     }
 
-    async parseTimetable() {
-        await this.checkUrl(urls.timetable);
+    async parseTimetable(week?: number): Promise<TimeTableDay[]> {
+        const url = urls.timetable + (week ? `?p_week=${week}` : "") 
+        await this.checkUrl(url);
 
         return await this.page.evaluate((selectors) => {
-            let timetable_data = []
+            let timetable_data: TimeTableDay[] = []
 
-            let timetable = document.querySelector(selectors.timetable);
+            let timetable = document.querySelector(selectors.timetable) as HTMLDivElement;
 
             let days = timetable.children;
 
             for (let day of days) {
-                let full_data = {
-                    title: day.children[0].innerText,
+                let full_data: TimeTableDay = {
+                    title: (day.children[0] as HTMLHeadingElement).innerText,
                     pairs: [],
                     no_pairs: false
                 }
@@ -96,23 +96,26 @@ class EtisParser {
                     continue;
                 }
 
-                let pairs = pairs_elem.querySelector(selectors.pairs);
+                let pairs = pairs_elem.querySelector(selectors.pairs) as HTMLTableSectionElement;
 
                 for (let pair of pairs.children) {
-                    let pair_num = pair.children[0].innerText;
-                    let pair_info = pair.children[1].innerText;
+                    let pair_num = (pair.children[0] as HTMLTableCellElement).innerText;
+                    let pair_info = (pair.children[1] as HTMLTableCellElement).innerText;
+
+                    let pair_link = (pair.querySelector(selectors.pair_link) as HTMLAnchorElement)
+                    
 
                     let pair_num_splited = pair_num.split("\n");
                     let pair_info_splited = pair_info.split("\n");
 
-                    let pair_data = {
+                    let pair_data: Pair = {
                         num: pair_num_splited[0],
                         time: pair_num_splited[1],
 
                         teacher: pair_info_splited[0],
                         pair: pair_info_splited[2],
-                        auditorium: pair_info_splited[3],
-
+                        auditorium: pair_link ? pair_link.href : pair_info_splited[3],
+                        distance: !!pair_link
                     }
                     full_data.pairs.push(pair_data);
                 }
@@ -139,7 +142,7 @@ class EtisParser {
 
     }
 
-    async checkUrl(url) {
+    async checkUrl(url: string) {
         if (this.page.url() !== url) {
             await this.page.goto(url);
         }
@@ -150,9 +153,3 @@ class EtisParser {
 
     }
 }
-
-
-let parser = await (new EtisParser("dvilper@mail.ru", "sagasword12")).init();
-
-
-console.log(await parser.parseTimetable());
