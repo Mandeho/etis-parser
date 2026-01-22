@@ -1,6 +1,9 @@
-import puppeteer, {Browser, Page} from "puppeteer";
 import urls from "./src/urls.js"
 import selectors from "./src/selectors.js"
+import service from "./src/service.js";
+
+import {load} from "cheerio";
+import {decode} from "iconv-lite";
 
 interface TimeTableDay {
     title: string
@@ -18,135 +21,101 @@ interface Pair {
     auditorium: string
 }
 
-export class EtisParser {
-    browser: Browser;
-    page: Page;
+export default class EtisParser {
     e_login = ""
     e_password = ""
-
-    session_cookie = {}
+    session_cookie =  "session_id=32453397gpOJjnIedKgeLokpaRmJqcParvgxObUFEKEWOWfj"
 
     constructor(login: string, password: string) {
-        this.e_login = login;
-        this.e_password = password;
+        this.e_login = login
+        this.e_password = password
     }
 
     async init() {
-        this.browser = await puppeteer.launch({
-            headless: true,
-            args: ['--ignore-certificate-errors'],
-        });
-
-        this.page = await this.browser.newPage()
-       
-        await this.page.goto(urls.timetable);
-        await this.login()
-
-        await this.page.waitForSelector(selectors.timetable);
-
-        await this.getSessionCookie()
+        if (!this.session_cookie) {
+            console.log("The user is not logged in")
+            await this.login()
+        }
+        else {
+            console.log("The user is already logged in")
+            service.setSessionCookie(this.session_cookie)
+        }
 
         return this;
     }
 
     async login() {
-        await this.page.evaluate((login, password, selectors) => {
-            let form = document.querySelector(selectors.login.form) as HTMLFormElement
+        let formData = "p_redirect=" +
+            `&p_username=${this.e_login}` +
+            `&p_password=${this.e_password}`
 
-            if (form) {
-                let loginInput = form.querySelector(selectors.login.login) as HTMLInputElement
-                let passwordInput = form.querySelector(selectors.login.password) as HTMLInputElement
+        let result = await service.post(
+            urls.login,
+            formData
+        )
 
-                loginInput.value = login;
-                passwordInput.value =  password;
-
-                form.submit()
-            }
-
-        }, this.e_login, this.e_password, selectors);
-
-
+        let cookie = result.headers["set-cookie"][0]
+        if (cookie) {
+            this.session_cookie = cookie.split(';')[0]
+            service.setSessionCookie(this.session_cookie)
+        }
+        else {
+            throw new Error("Could not get session cookie. Check your login or password.");
+        }
     }
 
     async parseTimetable(week?: number): Promise<TimeTableDay[]> {
-        const url = urls.timetable + (week ? `?p_week=${week}` : "") 
-        await this.checkUrl(url);
+        const url = urls.timetable + (week ? `?p_week=${week}` : "")
 
-        return await this.page.evaluate((selectors) => {
-            let timetable_data: TimeTableDay[] = []
+        let request = await service.get(url);
+        let parsed_timetable: TimeTableDay[] = []
+        let $ = load(decode(Buffer.from(request.data), 'cp1251'))
 
-            let timetable = document.querySelector(selectors.timetable) as HTMLDivElement;
+        let timetableElem = $(selectors.timetable.days)
+        timetableElem.each((i, day)=> {
 
-            let days = timetable.children;
-
-            for (let day of days) {
-                let full_data: TimeTableDay = {
-                    title: (day.children[0] as HTMLHeadingElement).innerText,
-                    pairs: [],
-                    no_pairs: false
-                }
-                let pairs_elem = day.children[1];
-
-                if (pairs_elem.className === "no_pairs") {
-                    full_data.no_pairs = true;
-                    timetable_data.push(full_data);
-                    continue;
-                }
-
-                let pairs = pairs_elem.querySelector(selectors.pairs) as HTMLTableSectionElement;
-
-                for (let pair of pairs.children) {
-                    let pair_num = (pair.children[0] as HTMLTableCellElement).innerText;
-                    let pair_info = (pair.children[1] as HTMLTableCellElement).innerText;
-
-                    let pair_link = (pair.querySelector(selectors.pair_link) as HTMLAnchorElement)
-                    
-
-                    let pair_num_splited = pair_num.split("\n");
-                    let pair_info_splited = pair_info.split("\n");
-
-                    let pair_data: Pair = {
-                        num: pair_num_splited[0],
-                        time: pair_num_splited[1],
-
-                        teacher: pair_info_splited[0],
-                        pair: pair_info_splited[2],
-                        auditorium: pair_link ? pair_link.href : pair_info_splited[3],
-                        distance: !!pair_link
-                    }
-                    full_data.pairs.push(pair_data);
-                }
-                timetable_data.push(full_data);
-
+            let day_elem = $(day)
+            let day_data: TimeTableDay = {
+                title: day_elem.find(selectors.timetable.day_title).text(),
+                pairs: [],
+                no_pairs: false,
             }
-            return timetable_data
-        }, selectors)
-    }
 
-    async getSessionCookie() {
-
-        let cookies = await this.browser.cookies()
-
-        if (cookies.length === 0 ) {return null}
-
-        for (let cookie of cookies) {
-            if (cookie.name === "session_id") {
-                this.session_cookie = cookie
-                return cookie;
+            let pairs_list = day_elem.find(selectors.timetable.pairs)
+            if (pairs_list.hasClass("no_pairs")) {
+                day_data.no_pairs = true;
+                parsed_timetable.push(day_data);
+                return
             }
-        }
-        return null;
 
-    }
+            pairs_list.each((i, pair) => {
+                let pair_elem = $(pair)
+                let pair_num = pair_elem.find(selectors.timetable.pair_num).contents().first().text()
+                let pair_time = pair_elem.find(selectors.timetable.pair_time).text()
 
-    async checkUrl(url: string) {
-        if (this.page.url() !== url) {
-            await this.page.goto(url);
+                let teacher = pair_elem.find(selectors.timetable.pair_info.teacher).text()
+                let pair_name = pair_elem.find(selectors.timetable.pair_info.pair_name).text().replaceAll("\n", "")
+                let aud_el = pair_elem.find(selectors.timetable.pair_info.aud)
+
+                let aud =  aud_el.text().replaceAll("\n", "")
+                let aud_link = aud_el.children().first().attr()?.href
+                if (aud_link) {
+                    aud = aud_link
+                }
+
+                let pair_data: Pair = {
+                    num: pair_num,
+                    time: pair_time,
+                    teacher: teacher,
+                    pair: pair_name,
+                    auditorium: aud,
+                    distance: !!aud_link
+                }
+                day_data.pairs.push(pair_data)
+            })
+            parsed_timetable.push(day_data)
+        })
+
+        return parsed_timetable;
         }
     }
-
-    async close() {
-        await this.browser.close();
-
-    }
-}
